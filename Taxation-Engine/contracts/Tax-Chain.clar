@@ -11,6 +11,7 @@
 (define-constant ERR-REFUND-DISALLOWED (err u107))
 (define-constant ERR-TAX-PERIOD-INVALID (err u108))
 (define-constant ERR-FUNDS-TRANSFER-FAILED (err u109))
+(define-constant ERR-INVALID-INPUT (err u110))
 
 ;; Contract configuration data
 (define-data-var contract-admin principal tx-sender)
@@ -87,6 +88,25 @@
     (map-get? tax-deduction-registry { deduction-identifier: deduction-identifier })
 )
 
+;; Input validation functions
+(define-private (validate-currency-symbol (currency-symbol (string-ascii 10)))
+    (let ((len (len currency-symbol)))
+        (and (> len u0) (<= len u10))
+    )
+)
+
+(define-private (validate-deduction-identifier (deduction-identifier (string-ascii 10)))
+    (let ((len (len deduction-identifier)))
+        (and (> len u0) (<= len u10))
+    )
+)
+
+(define-private (validate-deduction-title (deduction-title (string-ascii 64)))
+    (let ((len (len deduction-title)))
+        (and (> len u0) (<= len u64))
+    )
+)
+
 ;; Currency conversion utility
 (define-read-only (calculate-currency-conversion (source-amount uint) (from-currency (string-ascii 10)) (to-currency (string-ascii 10)))
     (let (
@@ -147,6 +167,11 @@
 (define-public (set-currency-exchange-rate (currency-symbol (string-ascii 10)) (updated-rate uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-admin)) ERR-UNAUTHORIZED-ACCESS)
+        ;; Validate currency symbol
+        (asserts! (validate-currency-symbol currency-symbol) ERR-INVALID-INPUT)
+        ;; Validate rate (must be greater than zero)
+        (asserts! (> updated-rate u0) ERR-INVALID-INPUT)
+        
         (ok (map-set forex-exchange-rates
             { currency-symbol: currency-symbol }
             { conversion-rate: updated-rate,
@@ -160,7 +185,15 @@
                (maximum-deductible uint) (relief-percentage uint) (requires-verification bool))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-admin)) ERR-UNAUTHORIZED-ACCESS)
+        ;; Validate deduction identifier
+        (asserts! (validate-deduction-identifier deduction-identifier) ERR-INVALID-INPUT)
+        ;; Validate deduction title
+        (asserts! (validate-deduction-title deduction-title) ERR-INVALID-INPUT)
+        ;; Validate maximum deductible (must be greater than zero)
+        (asserts! (> maximum-deductible u0) ERR-INVALID-INPUT)
+        ;; Validate relief percentage
         (asserts! (<= relief-percentage u100) ERR-TAX-PERCENTAGE-INVALID)
+        
         (ok (map-set tax-deduction-registry
             { deduction-identifier: deduction-identifier }
             { deduction-title: deduction-title,
@@ -174,6 +207,8 @@
 ;; Taxpayer-facing functions
 (define-public (claim-tax-deduction (deduction-identifier (string-ascii 10)) (claimed-amount uint))
     (let (
+        ;; Validate deduction identifier
+        (valid-identifier (validate-deduction-identifier deduction-identifier))
         (deduction-details (unwrap! (fetch-deduction-details deduction-identifier) ERR-DEDUCTION-INVALID))
         (taxpayer-data (default-to 
             {
@@ -187,6 +222,8 @@
             (fetch-taxpayer-data tx-sender)))
     )
         (begin
+            (asserts! valid-identifier ERR-INVALID-INPUT)
+            (asserts! (> claimed-amount u0) ERR-PAYMENT-AMOUNT-INVALID)
             (asserts! (<= claimed-amount (get deduction-cap deduction-details)) ERR-PAYMENT-AMOUNT-INVALID)
             (ok (map-set taxpayer-records
                 tx-sender
@@ -244,11 +281,15 @@
 ;; Tax refund processing with native STX transfer
 (define-public (process-tax-refund (taxpayer-id principal) (refund-amount uint) (refund-currency (string-ascii 10)))
     (let (
+        ;; Validate currency symbol
+        (valid-currency (validate-currency-symbol refund-currency))
         (taxpayer-data (unwrap! (fetch-taxpayer-data taxpayer-id) ERR-TAX-BRACKET-MISSING))
         (stx-equivalent-amount (unwrap! (calculate-currency-conversion refund-amount refund-currency "STX") ERR-CURRENCY-CODE-INVALID))
     )
         (begin
             (asserts! (is-eq tx-sender (var-get contract-admin)) ERR-UNAUTHORIZED-ACCESS)
+            (asserts! valid-currency ERR-INVALID-INPUT)
+            (asserts! (> refund-amount u0) ERR-PAYMENT-AMOUNT-INVALID)
             (asserts! (<= stx-equivalent-amount (get total-taxes-paid taxpayer-data)) ERR-REFUND-DISALLOWED)
             ;; Transfer STX to taxpayer
             (try! (stx-transfer? stx-equivalent-amount (var-get contract-admin) taxpayer-id))
